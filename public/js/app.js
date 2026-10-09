@@ -5025,6 +5025,96 @@ function downloadCsvTemplate(filename, headerLine) {
   URL.revokeObjectURL(url);
 }
 
+let lastAccountBulkResult = null;
+
+function roleRank(role) {
+  if (role === 'teacher') return 0;
+  if (role === 'parent') return 1;
+  return 2;
+}
+
+function lowestClass(classes) {
+  const list = Array.isArray(classes) ? classes : [];
+  if (!list.length) return { grade: 999, subject: '' };
+  return [...list].sort((a, b) => (
+    Number(a.grade) - Number(b.grade)
+    || String(a.subject || '').localeCompare(String(b.subject || ''))
+    || String(a.section || '').localeCompare(String(b.section || ''))
+  ))[0];
+}
+
+function sortSignInAccounts(accounts) {
+  return [...accounts].sort((a, b) => {
+    const roleDiff = roleRank(a.role) - roleRank(b.role);
+    if (roleDiff) return roleDiff;
+    if (a.role === 'teacher') {
+      const left = lowestClass(a.classes);
+      const right = lowestClass(b.classes);
+      if (Number(left.grade) !== Number(right.grade)) return Number(left.grade) - Number(right.grade);
+      const subjectDiff = String(left.subject || '').localeCompare(String(right.subject || ''));
+      if (subjectDiff) return subjectDiff;
+    }
+    const last = String(a.lastName || '').localeCompare(String(b.lastName || ''));
+    if (last) return last;
+    return String(a.firstName || '').localeCompare(String(b.firstName || ''));
+  });
+}
+
+function formatAccountClasses(classes) {
+  return (classes || []).map((item) => (
+    `Grade ${item.grade}${item.section ? ' ' + item.section : ''} · ${item.subject || 'Subject'}`
+  )).join('; ');
+}
+
+function accountRoleLabel(role) {
+  if (role === 'teacher') return 'Teacher';
+  if (role === 'parent') return 'Parent';
+  return 'User';
+}
+
+function downloadSignInSheet(accounts) {
+  const sorted = sortSignInAccounts(accounts);
+  const rows = sorted.map((account) => `
+    <tr>
+      <td>${escapeHtml(`${account.firstName || ''} ${account.lastName || ''}`.trim())}</td>
+      <td>${escapeHtml(accountRoleLabel(account.role))}</td>
+      <td>${escapeHtml(account.email || '')}</td>
+      <td><code>${escapeHtml(account.password || '')}</code></td>
+      <td>${escapeHtml(account.role === 'teacher' ? formatAccountClasses(account.classes) : '')}</td>
+    </tr>`).join('');
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ConnectED sign-in sheet</title>
+  <style>
+    body { font-family: Georgia, serif; color: #2a2118; margin: 24px; }
+    h1 { font-size: 1.4rem; margin-bottom: 4px; }
+    p { font-size: 0.92rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+    th, td { border: 1px solid #c4b4a4; padding: 8px; text-align: left; vertical-align: top; font-size: 0.9rem; }
+    th { background: #f3e6d8; }
+    code { font-family: Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <h1>ConnectED sign-in sheet</h1>
+  <p>Sign in with the email and temporary password, then change the password when prompted. Do not share this sheet.</p>
+  <table>
+    <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Temporary password</th><th>Classes</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+</body>
+</html>`;
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'connected-sign-in-sheet.html';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function paintBulkResult(el, data, noun) {
   if (!el) return;
   const failed = Array.isArray(data.failed) ? data.failed : [];
@@ -5036,7 +5126,38 @@ function paintBulkResult(el, data, noun) {
   const mailNote = Number.isFinite(emailed)
     ? ` Sign-in details emailed to ${emailed}.`
     : '';
-  el.innerHTML = `<p class="page-subheading">${Number(data.created) || 0} ${noun}.${mailNote}</p>${items ? `<ul class="bulk-result-list">${items}</ul>` : ''}`;
+  const texted = Number(data.texted);
+  const textNote = Number.isFinite(texted)
+    ? ` Texted to ${texted}.`
+    : '';
+  const accounts = Array.isArray(data.createdAccounts) ? sortSignInAccounts(data.createdAccounts) : [];
+  if (accounts.length) lastAccountBulkResult = { ...data, createdAccounts: accounts };
+  const accountRows = accounts.map((account) => {
+    const name = `${account.firstName || ''} ${account.lastName || ''}`.trim();
+    const classes = account.role === 'teacher' ? formatAccountClasses(account.classes) : '';
+    const delivery = [
+      account.emailSent ? 'Emailed' : 'Email not sent',
+      account.texted ? 'Texted' : 'No text'
+    ].join(' · ');
+    return `<li class="bulk-signin-row" data-user-id="${account.userId}">
+      <div>
+        <strong>${escapeHtml(name)}</strong>
+        <span>${escapeHtml(accountRoleLabel(account.role))}</span>
+        <span>${escapeHtml(account.email || '')}</span>
+        ${classes ? `<span>${escapeHtml(classes)}</span>` : ''}
+        <code>${escapeHtml(account.password || '')}</code>
+        <span class="page-subheading">${escapeHtml(delivery)}</span>
+      </div>
+      <div class="bulk-signin-actions">
+        <button type="button" class="chip-ghost" data-bulk-copy="${account.userId}">Copy</button>
+        <button type="button" class="chip-ghost" data-bulk-regen="${account.userId}">Generate again</button>
+      </div>
+    </li>`;
+  }).join('');
+  const sheet = accounts.length
+    ? `<div class="bulk-signin-toolbar"><button type="button" class="chip-ghost" data-bulk-sheet>Download sign-in sheet</button></div><ul class="bulk-signin-list">${accountRows}</ul>`
+    : '';
+  el.innerHTML = `<p class="page-subheading">${Number(data.created) || 0} ${noun}.${mailNote}${textNote}</p>${sheet}${items ? `<ul class="bulk-result-list">${items}</ul>` : ''}`;
 }
 
 async function submitBulkImport({ url, fileInput, errorEl, resultEl, noun, refresh }) {
@@ -5068,7 +5189,7 @@ async function submitBulkImport({ url, fileInput, errorEl, resultEl, noun, refre
 document.getElementById('bulk-account-template')?.addEventListener('click', () => {
   downloadCsvTemplate(
     'account-import-template.csv',
-    'first_name,last_name,email,password,role,phone,address,emergency_contact,is_class_adviser,class_adviser_grade,class_adviser_section,is_subject_teacher,subject_assignments\n'
+    'first_name,last_name,email,role,phone,address,emergency_contact,is_class_adviser,class_adviser_grade,class_adviser_section,is_subject_teacher,subject_assignments\n'
   );
 });
 document.getElementById('bulk-student-template')?.addEventListener('click', () => {
@@ -5077,6 +5198,50 @@ document.getElementById('bulk-student-template')?.addEventListener('click', () =
     'lrn,first_name,middle_name,last_name,grade_level,section,dob,gender,parent_email\n'
   );
 });
+document.getElementById('bulk-account-result')?.addEventListener('click', async (e) => {
+  const resultEl = document.getElementById('bulk-account-result');
+  const errorEl = document.getElementById('bulk-account-error');
+  if (e.target.closest('[data-bulk-sheet]')) {
+    if (lastAccountBulkResult?.createdAccounts?.length) downloadSignInSheet(lastAccountBulkResult.createdAccounts);
+    return;
+  }
+  const copyBtn = e.target.closest('[data-bulk-copy]');
+  if (copyBtn) {
+    const account = lastAccountBulkResult?.createdAccounts?.find((item) => String(item.userId) === String(copyBtn.dataset.bulkCopy));
+    if (!account?.password) return;
+    try {
+      await navigator.clipboard.writeText(account.password);
+      showToast('Temporary password copied.');
+    } catch {
+      showToast('Select and copy the password manually.', 'error');
+    }
+    return;
+  }
+  const regenBtn = e.target.closest('[data-bulk-regen]');
+  if (!regenBtn || !lastAccountBulkResult) return;
+  const account = lastAccountBulkResult.createdAccounts.find((item) => String(item.userId) === String(regenBtn.dataset.bulkRegen));
+  if (!account) return;
+  regenBtn.disabled = true;
+  const password = generateTempPassword();
+  try {
+    const res = await fetch(`${API_URL}/admin/accounts/${account.userId}/reset-password`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ password, deliver: true })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not generate a new password');
+    account.password = password;
+    account.emailSent = !!data.emailSent;
+    account.texted = !!data.texted;
+    paintBulkResult(resultEl, lastAccountBulkResult, 'account(s) added');
+    showToast('New temporary password saved.');
+  } catch (err) {
+    if (errorEl) errorEl.textContent = err.message;
+    regenBtn.disabled = false;
+  }
+});
+
 document.getElementById('bulk-account-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const errorEl = document.getElementById('bulk-account-error');

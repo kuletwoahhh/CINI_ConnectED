@@ -23,7 +23,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/css/styles.css?v=20261009c2" />
+  <link rel="stylesheet" href="/css/styles.css?v=20261009p1" />
 
 </head>
 <body data-view="login">
@@ -1680,7 +1680,7 @@
 
   <!-- Single-page app: load unified app.js that handles role-based routing -->
   <script src="/js/vendor/chart.umd.js"></script>
-  <script src="/js/app.js?v=20261009g1" type="module"></script>
+  <script src="/js/app.js?v=20261009p1" type="module"></script>
 
 <!-- RE-ENROLL STUDENT MODAL -->
 <div id="reenroll-student-modal" class="modal-overlay" hidden>
@@ -1895,10 +1895,10 @@
 
 <!-- ADD ACCOUNT MODAL -->
 <div id="bulk-account-modal" class="modal-overlay" hidden>
-  <div class="modal-card" style="max-width:560px;">
+  <div class="modal-card" style="max-width:760px;">
     <h3 class="font-heading">Bulk Add Accounts</h3>
-    <p class="page-subheading">Upload an Excel (.xlsx) or CSV file. One row creates one teacher or parent. Download the template for the column names.</p>
-    <p class="page-subheading">Teachers need <code>is_class_adviser</code> and/or <code>is_subject_teacher</code> set to yes. Subject rows use <code>CODE:grade:section</code> separated by semicolons, for example <code>MATH:4:A;SCI:5:B</code>.</p>
+    <p class="page-subheading">Upload an Excel (.xlsx) or CSV file. One row creates one teacher or parent. ConnectED assigns a temporary password, emails it, and texts it when the row has a valid mobile number. Download the template for the column names.</p>
+    <p class="page-subheading">Teachers need <code>is_class_adviser</code> and/or <code>is_subject_teacher</code> set to yes. A class adviser receives every subject for that grade: Grades 1–3 get the lower-grade list, and Grades 4–6 also get Computer and TLE. Leave <code>subject_assignments</code> blank unless the teacher handles an extra Grades 4–6 class. Extra classes use <code>CODE:grade:section</code> separated by semicolons, for example <code>MATH:4:A;SCI:5:B</code>.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">
       <button type="button" class="chip-ghost" id="bulk-account-template">Download template</button>
     </div>

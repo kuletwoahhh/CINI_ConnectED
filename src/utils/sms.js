@@ -635,6 +635,7 @@ module.exports = {
   pickParentPhone,
   enqueueSms,
   processSmsQueue,
+  sendQueuedNow,
   startSmsWorker,
   scoreNoticeBody,
   ANNOUNCEMENT_SMS_BODY,

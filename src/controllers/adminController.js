@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../../db');
 const bcrypt = require('bcryptjs');
 const { schoolYear } = require('../config');
@@ -493,6 +494,51 @@ exports.createAccount = async (req, res) => {
   }
 };
 
+const TEMP_PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+
+function generateBulkPassword(length = 10) {
+  let out = '';
+  for (let i = 0; i < length; i += 1) {
+    out += TEMP_PASSWORD_ALPHABET[crypto.randomInt(TEMP_PASSWORD_ALPHABET.length)];
+  }
+  return out;
+}
+
+async function deliverAccountPassword({ userId, firstName, lastName, email, role, password, phone, emergencyContact }) {
+  const mail = await sendAccountDetails({ firstName, lastName, email, role, password });
+  const { pickParentPhone, enqueueSms } = require('../utils/sms');
+  const mobile = pickParentPhone(phone, emergencyContact);
+  let textQueued = false;
+  let smsId = null;
+  if (mobile) {
+    const queued = await enqueueSms({
+      parentId: role === 'parent' ? userId : null,
+      phone: mobile,
+      body: `ConnectED: Your temporary password is ${password}. Sign in with your email, then change it. Do not share this password.`,
+      allowDuplicate: true
+    });
+    textQueued = !!queued.queued;
+    smsId = queued.id || null;
+  }
+  return { emailSent: !!mail.sent, textQueued, smsId };
+}
+
+async function loadAccountClasses(userId) {
+  const [rows] = await db.query(
+    `SELECT ta.grade_level, ta.section, ta.subject_id, s.NAME AS subject_name
+     FROM teacher_assignments ta
+     LEFT JOIN subjects s ON s.id = ta.subject_id
+     WHERE ta.teacher_id = ? AND ta.school_year = ?
+     ORDER BY ta.grade_level, s.NAME, ta.section`,
+    [userId, schoolYear]
+  );
+  return rows.map((row) => ({
+    grade: Number(row.grade_level),
+    section: String(row.section || ''),
+    subject: row.subject_id == null ? 'Class adviser' : String(row.subject_name || 'Subject')
+  }));
+}
+
 function yesFlag(value) {
   const s = String(value || '').trim().toLowerCase();
   return s === 'yes' || s === 'y' || s === 'true' || s === '1';
@@ -527,20 +573,25 @@ exports.bulkCreateAccounts = async (req, res) => {
 
     const actorId = req.user?.id || req.user?.userId;
     const failed = [];
-    let created = 0;
+    const createdAccounts = [];
+    const smsIds = [];
     let emailed = 0;
+    let texted = 0;
     for (const row of rows) {
       const email = String(row.email || '').trim();
       try {
         const role = String(row.role || '').trim().toLowerCase();
         if (role === 'admin') throw accountError(400, 'Admin accounts cannot be imported');
         const subject_assignments = await subjectAssignmentsFromCell(row.subject_assignments);
-        await createAccountRecord({
+        const password = generateBulkPassword();
+        const firstName = plainText(row.first_name);
+        const lastName = plainText(row.last_name);
+        const { userId } = await createAccountRecord({
           first_name: row.first_name,
           last_name: row.last_name,
           email,
           phone: row.phone,
-          password: row.password,
+          password,
           role,
           address: row.address,
           emergency_contact: row.emergency_contact,
@@ -550,15 +601,32 @@ exports.bulkCreateAccounts = async (req, res) => {
           is_subject_teacher: yesFlag(row.is_subject_teacher),
           subject_assignments
         }, actorId);
-        created += 1;
-        const mail = await sendAccountDetails({
-          firstName: plainText(row.first_name),
-          lastName: plainText(row.last_name),
+        const delivery = await deliverAccountPassword({
+          userId,
+          firstName,
+          lastName,
           email,
           role,
-          password: String(row.password || '')
+          password,
+          phone: row.phone,
+          emergencyContact: row.emergency_contact
         });
-        if (mail.sent) emailed += 1;
+        if (delivery.emailSent) emailed += 1;
+        if (delivery.textQueued) {
+          texted += 1;
+          if (delivery.smsId) smsIds.push(delivery.smsId);
+        }
+        createdAccounts.push({
+          userId,
+          firstName,
+          lastName,
+          email,
+          role,
+          password,
+          emailSent: delivery.emailSent,
+          texted: delivery.textQueued,
+          classes: role === 'teacher' ? await loadAccountClasses(userId) : []
+        });
       } catch (error) {
         failed.push({
           row: row.__row,
@@ -567,7 +635,15 @@ exports.bulkCreateAccounts = async (req, res) => {
         });
       }
     }
-    res.json({ created, failed, emailed });
+    if (smsIds.length) {
+      try {
+        const { sendQueuedNow } = require('../utils/sms');
+        await sendQueuedNow(smsIds);
+      } catch (smsError) {
+        console.error('[sms] bulk account passwords:', smsError.message);
+      }
+    }
+    res.json({ created: createdAccounts.length, failed, emailed, texted, createdAccounts });
   } catch (error) {
     console.error('Bulk create accounts error:', error);
     res.status(error.status || 500).json({ error: error.message || 'Server error importing accounts' });
@@ -1273,8 +1349,12 @@ exports.resetAccountPassword = async (req, res) => {
       return res.status(400).json({ error: 'Temporary password must be at least 6 characters' });
     }
 
+    const deliver = req.body?.deliver === true;
     const [users] = await db.query(
-      'SELECT id, first_name, last_name, role FROM users WHERE id = ?',
+      `SELECT u.id, u.first_name, u.last_name, u.email, u.phone, u.role, pp.emergency_contact
+       FROM users u
+       LEFT JOIN parent_profiles pp ON pp.user_id = u.id
+       WHERE u.id = ?`,
       [id]
     );
     if (!users.length) return res.status(404).json({ error: 'Account not found' });
@@ -1299,7 +1379,32 @@ exports.resetAccountPassword = async (req, res) => {
 
     const name = `${users[0].first_name} ${users[0].last_name}`;
     await logActivity(db, adminId, 'Reset account password', 'user', name, `User ID ${id}`);
-    res.json({ message: 'Temporary password set. The user must change it after sign-in.' });
+    if (!deliver) {
+      return res.json({ message: 'Temporary password set. The user must change it after sign-in.' });
+    }
+    const delivery = await deliverAccountPassword({
+      userId: users[0].id,
+      firstName: users[0].first_name,
+      lastName: users[0].last_name,
+      email: users[0].email,
+      role: users[0].role,
+      password: String(password).trim(),
+      phone: users[0].phone,
+      emergencyContact: users[0].emergency_contact
+    });
+    if (delivery.smsId) {
+      try {
+        const { sendQueuedNow } = require('../utils/sms');
+        await sendQueuedNow([delivery.smsId]);
+      } catch (smsError) {
+        console.error('[sms] reset password:', smsError.message);
+      }
+    }
+    res.json({
+      message: 'Temporary password set. The user must change it after sign-in.',
+      emailSent: delivery.emailSent,
+      texted: delivery.textQueued
+    });
   } catch (error) {
     console.error('Reset account password error:', error);
     res.status(500).json({ error: 'Server error resetting password', details: error.message });
@@ -1652,12 +1757,24 @@ async function buildEffectiveSubjectAssignments(conn, {
     })));
   }
 
-  if (hasClassAdviser && isUpperGrade && Array.isArray(class_adviser_subjects)) {
-    effective = effective.concat(class_adviser_subjects.map(sid => ({
-      subject_id: Number(sid),
-      grade_level: String(class_adviser_grade),
-      section: class_adviser_section
-    })));
+  if (hasClassAdviser && isUpperGrade && class_adviser_grade && class_adviser_section) {
+    const selected = Array.isArray(class_adviser_subjects)
+      ? class_adviser_subjects.map(Number).filter((id) => Number.isFinite(id) && id > 0)
+      : [];
+    if (selected.length) {
+      effective = effective.concat(selected.map((sid) => ({
+        subject_id: sid,
+        grade_level: String(class_adviser_grade),
+        section: class_adviser_section
+      })));
+    } else {
+      const autoSubjects = await getSubjectsForGrade(conn, class_adviser_grade);
+      effective = effective.concat(autoSubjects.map((s) => ({
+        subject_id: s.id,
+        grade_level: String(class_adviser_grade),
+        section: class_adviser_section
+      })));
+    }
   }
 
   if (hasSubjectTeacher && Array.isArray(subject_assignments)) {
